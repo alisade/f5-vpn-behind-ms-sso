@@ -1,0 +1,130 @@
+#!/bin/bash
+#
+# F5 VPN Login Script
+# Usage:
+#   ./f5-vpn                       - Playwright automation (uses ~/.f5-vpn.conf)
+#   ./f5-vpn -u <email>            - Playwright with username (prompts for password)
+#   ./f5-vpn --init-config         - Create sample config file
+#   ./f5-vpn --no-config           - Ignore config file
+#   ./f5-vpn --manual              - Manual mode (opens Chrome, prompts for session ID)
+#   ./f5-vpn --session <id>        - Direct mode with known session ID
+#
+# Config file: ~/.f5-vpn.conf
+#   [credentials]
+#   username = your.email@example.com
+#   password = yourpassword  # optional
+#
+
+# Resolve symlinks to get the actual script directory
+SCRIPT_SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "$SCRIPT_SOURCE" ]]; do
+    SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_SOURCE")" && pwd)"
+    SCRIPT_SOURCE="$(readlink "$SCRIPT_SOURCE")"
+    [[ "$SCRIPT_SOURCE" != /* ]] && SCRIPT_SOURCE="$SCRIPT_DIR/$SCRIPT_SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_SOURCE")" && pwd)"
+VPN_HOST="vpn.example.com"
+
+# Parse arguments
+USERNAME=""
+PASSWORD=""
+MANUAL_MODE=false
+SESSION_ID=""
+NO_CONFIG=false
+INIT_CONFIG=false
+DEBUG_MODE=false
+NO_HEADLESS=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --manual|-m)
+            MANUAL_MODE=true
+            shift
+            ;;
+        --session|-s)
+            SESSION_ID="$2"
+            shift 2
+            ;;
+        --username|-u)
+            USERNAME="$2"
+            shift 2
+            ;;
+        --password|-p)
+            PASSWORD="$2"
+            shift 2
+            ;;
+        --no-config)
+            NO_CONFIG=true
+            shift
+            ;;
+        --init-config)
+            INIT_CONFIG=true
+            shift
+            ;;
+        --debug|-d)
+            DEBUG_MODE=true
+            shift
+            ;;
+        --no-headless)
+            NO_HEADLESS=true
+            shift
+            ;;
+        *)
+            # Backward compatibility: treat bare argument as session ID
+            if [[ -n "$1" ]] && [[ "$1" != "--"* ]]; then
+                SESSION_ID="$1"
+            fi
+            shift
+            ;;
+    esac
+done
+
+# Manual mode: open browser and prompt for session ID
+if [[ "$MANUAL_MODE" == true ]]; then
+    open -a "Google Chrome" "https://${VPN_HOST}/"
+    
+    sessionid=""
+    counter=0
+    while [[ -z "$sessionid" ]]; do
+        ((counter++))
+        read -p "Enter session ID: " sessionid
+        [[ -z "$sessionid" ]] && echo "Session ID is required"
+        [[ $counter -ge 3 ]] && echo "Too many attempts" && exit 1
+    done
+    
+    cd ~/git/svpn-login
+    source bin/activate
+    ./svpn-login.py --sessionid "$sessionid" "$VPN_HOST"
+
+# Direct mode: session ID provided
+elif [[ -n "$SESSION_ID" ]]; then
+    cd ~/git/svpn-login
+    source bin/activate
+    ./svpn-login.py --sessionid "$SESSION_ID" "$VPN_HOST"
+
+# Default: Use Playwright automation
+else
+    cd "$SCRIPT_DIR"
+    
+    # Check if virtual environment exists
+    if [[ ! -d "venv" ]]; then
+        echo "Setting up Python virtual environment..."
+        python3 -m venv venv
+        source venv/bin/activate
+        pip install -r requirements.txt
+        playwright install chromium
+    else
+        source venv/bin/activate
+    fi
+    
+    # Build Python arguments
+    PYTHON_ARGS=""
+    [[ -n "$USERNAME" ]] && PYTHON_ARGS="$PYTHON_ARGS --username $USERNAME"
+    [[ -n "$PASSWORD" ]] && PYTHON_ARGS="$PYTHON_ARGS --password $PASSWORD"
+    [[ "$NO_CONFIG" == true ]] && PYTHON_ARGS="$PYTHON_ARGS --no-config"
+    [[ "$INIT_CONFIG" == true ]] && PYTHON_ARGS="$PYTHON_ARGS --init-config"
+    [[ "$DEBUG_MODE" == true ]] && PYTHON_ARGS="$PYTHON_ARGS --debug"
+    [[ "$NO_HEADLESS" == true ]] && PYTHON_ARGS="$PYTHON_ARGS --no-headless"
+    
+    python3 f5-vpn.py $PYTHON_ARGS
+fi
