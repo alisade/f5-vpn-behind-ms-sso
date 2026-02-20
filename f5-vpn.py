@@ -13,6 +13,10 @@ Format:
     username = your.email@example.com
     password = yourpassword
     totp_secret = YOUR_BASE32_SECRET_KEY
+
+Session cache: ~/.f5-vpn-session
+    Cached session_id is reused for 8 hours to avoid re-authentication.
+    Use --no-cache to force a fresh login.
 """
 
 import argparse
@@ -22,6 +26,7 @@ import os
 import subprocess
 import sys
 import re
+import time
 from typing import Optional
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 
@@ -36,6 +41,8 @@ except ImportError:
 SVPN_LOGIN_DIR = os.path.expanduser("~/git/svpn-login")
 SVPN_LOGIN_SCRIPT = os.path.join(SVPN_LOGIN_DIR, "svpn-login.py")
 CONFIG_FILE = os.path.expanduser("~/.f5-vpn.conf")
+SESSION_CACHE_FILE = os.path.expanduser("~/.f5-vpn-session")
+SESSION_CACHE_TTL_SECONDS = 8 * 3600  # 8 hours
 
 
 def load_config() -> dict:
@@ -97,6 +104,48 @@ def load_config() -> dict:
         print(f"⚠ Error reading config file: {e}")
     
     return config
+
+
+def load_cached_session(host: str) -> Optional[str]:
+    """
+    Load session_id from ~/.f5-vpn-session if present and not older than 8 hours.
+    Returns session_id only if cache exists, matches host, and is within TTL.
+    """
+    if not os.path.exists(SESSION_CACHE_FILE):
+        return None
+    try:
+        with open(SESSION_CACHE_FILE, 'r') as f:
+            data = {}
+            for line in f:
+                line = line.strip()
+                if line and '=' in line and not line.startswith('#'):
+                    key, value = line.split('=', 1)
+                    data[key.strip()] = value.strip()
+        session_id = data.get('session_id')
+        cached_at_str = data.get('cached_at')
+        cached_host = data.get('host', '')
+        if not session_id or not cached_at_str:
+            return None
+        if cached_host and cached_host != host:
+            return None
+        cached_at = int(cached_at_str)
+        if time.time() - cached_at > SESSION_CACHE_TTL_SECONDS:
+            return None
+        return session_id
+    except (ValueError, OSError):
+        return None
+
+
+def save_cached_session(session_id: str, host: str) -> None:
+    """Write session_id and timestamp to ~/.f5-vpn-session for reuse within 8 hours."""
+    try:
+        with open(SESSION_CACHE_FILE, 'w') as f:
+            f.write(f"session_id={session_id}\n")
+            f.write(f"cached_at={int(time.time())}\n")
+            f.write(f"host={host}\n")
+        os.chmod(SESSION_CACHE_FILE, 0o600)
+    except OSError as e:
+        print(f"⚠ Could not write session cache: {e}")
 
 
 def create_sample_config():
@@ -741,6 +790,7 @@ def parse_args():
     parser.add_argument('--password', '-p', help='Microsoft SSO password (will prompt if not provided)')
     parser.add_argument('--no-headless', action='store_true', help='Show browser window (default: headless when credentials provided)')
     parser.add_argument('--no-config', action='store_true', help='Ignore config file')
+    parser.add_argument('--no-cache', action='store_true', help='Ignore cached session and log in again')
     parser.add_argument('--init-config', action='store_true', help='Create sample config file and exit')
     parser.add_argument('--debug', '-d', action='store_true', help='Enable debug output for MFA extraction')
     return parser.parse_args()
@@ -795,6 +845,14 @@ def main():
     else:
         print("🖥️  Running in headed mode (browser window visible)")
     
+    # Try cached session first (unless --no-cache)
+    if not args.no_cache:
+        session_id = load_cached_session(host)
+        if session_id:
+            print(f"✓ Using cached session from {SESSION_CACHE_FILE} (valid for 8 hours)")
+            run_svpn_login(session_id, host)
+            return
+    
     with sync_playwright() as p:
         # Launch browser
         browser = p.chromium.launch(
@@ -820,6 +878,7 @@ def main():
         
         if session_id:
             print(f"\n✓ Session ID obtained: {session_id[:16]}...")
+            save_cached_session(session_id, host)
             browser.close()
             
             # Now run the VPN login with the session
