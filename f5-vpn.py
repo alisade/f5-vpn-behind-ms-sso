@@ -281,6 +281,50 @@ def enter_totp_code(page, code: str) -> bool:
         return False
 
 
+def is_on_number_matching_screen(page) -> bool:
+    """
+    Quick check if we're already on the two-digit number screen (skip method selection).
+    Microsoft sometimes lands here directly after credentials.
+    """
+    try:
+        found = page.evaluate("""
+            () => {
+                const el = document.querySelector('#idRichContext_DisplaySign');
+                if (el) {
+                    const t = (el.textContent || '').trim();
+                    return t.length <= 2 && /^\\d+$/.test(t);
+                }
+                const candidates = document.querySelectorAll('[id*="isplaySign"], [class*="DisplaySign"]');
+                for (const c of candidates) {
+                    const t = (c.textContent || '').trim();
+                    if (t.length === 2 && /^\\d+$/.test(t)) return true;
+                }
+                return false;
+            }
+        """)
+        return bool(found)
+    except Exception:
+        return False
+
+
+def is_totp_entry_visible(page) -> bool:
+    """Check if the TOTP/verification code input is visible (we landed on code entry screen)."""
+    totp_input_selectors = [
+        'input#idTxtBx_SAOTCC_OTC',
+        'input[name="otc"]',
+        'input[placeholder*="code"]',
+        'input[autocomplete="one-time-code"]',
+    ]
+    for selector in totp_input_selectors:
+        try:
+            elem = page.locator(selector)
+            if elem.count() > 0 and elem.first.is_visible(timeout=500):
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def select_totp_mfa_option(page) -> bool:
     """
     Select the 'Use a verification code' MFA option for TOTP.
@@ -642,9 +686,19 @@ def wait_for_login_and_extract_session(page, username: str = None, password: str
                     if credentials_filled:
                         continue
             
-            # Select MFA method based on whether we have TOTP secret
+            # Select MFA method (or detect we already skipped to number/code screen)
             if credentials_filled and not mfa_selected:
                 if 'microsoftonline' in current_host or 'login.microsoft' in current_host:
+                    # Sometimes Microsoft skips the method picker and lands on number or code screen
+                    if totp_secret and is_totp_entry_visible(page):
+                        mfa_selected = True
+                        print("✓ Already on verification code entry screen")
+                        continue
+                    if not totp_secret and is_on_number_matching_screen(page):
+                        mfa_selected = True
+                        print("✓ Already on number matching screen")
+                        continue
+                    # Otherwise show method selection and click the chosen option
                     if totp_secret:
                         mfa_selected = select_totp_mfa_option(page)
                     else:
